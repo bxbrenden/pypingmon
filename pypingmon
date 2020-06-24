@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+
+import logging
+import os
+from os import environ as env
+import shlex
+import subprocess
+import sys
+from twilio.base.exceptions import TwilioRestException
+from twilio.rest import Client
+
+def get_twilio_creds():
+    '''get Twilio credentials from environment variables'''
+    try:
+        twilio_sid = env['TWILIO_SID']
+        twilio_token = env['TWILIO_TOKEN']
+    except KeyError:
+        print('Failed to get TWILIO_SID or TWILIO_TOKEN')
+        print('    Make sure to set all Twilio environment variables')
+        sys.exit(1)
+    else:
+        return (twilio_sid, twilio_token)
+
+
+def get_phone_numbers():
+    '''get Twilio source and destination phone numbers from environment variables'''
+    try:
+        src_num = env['TWILIO_SRC_NUM']
+        dst_num = env['TWILIO_DST_NUM']
+    except KeyError:
+        print('Failed to get TWILIO_SRC_NUM or TWILIO_DST_NUM.')
+        print('    Make sure to set all Twilio environment variables.')
+        sys.exit(1)
+    else:
+        return (src_num, dst_num)
+
+
+def get_host():
+    '''determine which host to monitor based on the PYPINGMON_WATCH_HOST environment variable'''
+    try:
+        monitor_host = env['PYPINGMON_WATCH_HOST']
+    except KeyError:
+        print('Failed to get PYPINGMON_WATCH_HOST.')
+        print('    Make sure to set $PYPINGMON_WATCH_HOST to choose which host to ping')
+        sys.exit(1)
+    else:
+        return monitor_host
+
+
+def get_num_pings():
+    '''determine the number of ping packets to use based on the PYPINGMON_NUM_PINGS environment variable'''
+    try:
+        num_pings = env['PYPINGMON_NUM_PINGS']
+    except KeyError:
+        print('Failed to get PYPINGMON_NUM_PINGS')
+        print('    Make sure to set $PYPINGMON_NUM_PINGS to set the number of ping packets to use')
+        sys.exit(1)
+    else:
+        return num_pings
+
+
+def get_log_level():
+    '''get the logging verbosity level from the PYPINGMON_LOG_LEVEL environment variable, otherwise choose logging.INFO'''
+    try:
+        log_env = env['PYPINGMON_LOG_LEVEL']
+        if log_env in ['DEBUG', 'INFO', 'WARNING' 'ERROR', 'CRITICAL']:
+            if log_env == 'DEBUG':
+                return logging.DEBUG
+            elif log_env == 'INFO':
+                return logging.INFO
+            elif log_env == 'WARNING':
+                return logging.WARNING
+            elif log_env == 'ERROR':
+                return logging.ERROR
+            elif log_env == 'CRITICAL':
+                return logging.CRITICAL
+    except KeyError:
+        # if none of the above ^, default to logging.info
+        return logging.INFO
+
+
+def send_alert(hostname, num_pings, src_phone, dst_phone, twilio_sid, twilio_token):
+    '''send an SMS alert about the monitored host failing the ping test'''
+    client = Client(twilio_sid, twilio_token)
+    message = f'Alert: server {hostname} failed to respond to {num_pings} ping requests. It may be down.'
+
+    try:
+        alert = client.messages.create(to=dst_phone,
+                                       from_=src_phone,
+                                       body=message)
+    except TwilioRestException as e:
+        print(f'Error, failed to send Twilio SMS alert')
+        print(f'    Error from Twilio:\n{e}')
+
+
+def monitor_server(hostname, num_pings, src_phone, dst_phone, twilio_sid, twilio_token):
+    '''ping `hostname` and send SMS alert if pinging fails. Exit after sending SMS.
+       The `ping` command fails when all attempted ICMP echo requests are failures'''
+
+    command = f'ping -c {num_pings} {hostname}'
+    #devnull = open(os.devnull, 'w')
+    cmd = shlex.split(command)
+
+    while True:
+        logging.info(f'Pinging {hostname} with {num_pings} ICMP packets')
+        #status = subprocess.call(cmd, stdout=devnull)
+        status = subprocess.call(cmd)
+        if status == 0:
+            logging.info(f'Pinging {hostname} was successful')
+        else:
+            logging.error(f'Alert: server {hostname} failed to respond to {num_pings} ping requests. It may be down.')
+            send_alert(hostname, num_pings, src_phone, dst_phone, twilio_sid, twilio_token)
+            logging.info(f'Sent SMS alert from {src_phone} to {dst_phone}')
+            logging.info(f'pypingmon will now begin checking for {hostname} to be pingable')
+            break
+
+
+def detect_healed(hostname, num_pings):
+    '''Check for a "healed" server once monitored server fails to be pingable.
+       Return control to `monitor_server` once it is pingable again'''
+
+    command = f'ping -c {num_pings} {hostname}'
+    cmd = shlex.split(command)
+
+    while True:
+        logging.info(f'pypingmon checking for healed status of {hostname}')
+        status = subprocess.call(cmd)
+
+        if status == 0:
+            logging.info(f'Server {hostname} has healed. Resuming ping monitoring and SMS alerting...')
+            break
+        else:
+            logging.info(f'Server {hostname} is not healed. Continuing...')
+
+
+def main():
+    twilio_sid, twilio_token = get_twilio_creds()
+    src_phone, dst_phone = get_phone_numbers()
+    hostname = get_host()
+    num_pings = get_num_pings()
+    log_level = get_log_level()
+
+    logging.basicConfig(filename="/var/log/pypingmon.log",
+                        format='%(asctime)s:%(levelname)s:%(message)s',
+                        level=log_level)
+
+    logging.info(f'pypingmon initialized. Monitoring server {hostname} for {num_pings} consecutive ping failures')
+    while True:
+        monitor_server(hostname, num_pings, src_phone, dst_phone, twilio_sid, twilio_token)
+        detect_healed(hostname, num_pings)
+
+
+if __name__ == '__main__':
+    main()

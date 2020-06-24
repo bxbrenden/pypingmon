@@ -1,0 +1,10 @@
+[Unit]
+Description=pypingmon ping monitoring and SMS alerting service
+Documentation=https://github.com/bxbrenden/pypingmon/blob/master/README.md
+
+[Service]
+Type=simple
+ExecStart=pypingmon
+
+[Install]
+WantedBy=multi-user.target
